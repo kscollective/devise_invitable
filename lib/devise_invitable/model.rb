@@ -25,7 +25,17 @@ module Devise
 
       included do
         include ::DeviseInvitable::Inviter        
-        belongs_to :invited_by, :polymorphic => true
+
+        property :invitation_token, String, :length => 60, :index => true
+        property :invitation_sent_at, DateTime
+        property :invitation_accepted_at, DateTime
+        property :invitation_limit, Integer
+
+        # Taking this out and manually handling the polymoprhism ourselves.
+        # See also invited_by= and invited_by
+        # belongs_to :invited_by, :polymorphic => true
+        property :invited_by_id,    String
+        property :invited_by_klass, Class
         
         include ActiveSupport::Callbacks
         define_callbacks :invitation_accepted
@@ -45,6 +55,24 @@ module Devise
         end
       end
 
+      def invited_by=(inviter)
+        if !inviter.nil?
+          self.invited_by_id = inviter.id
+          self.invited_by_klass = inviter.class
+        end
+        inviter
+      end
+
+      def invited_by
+        inviter = nil
+
+        if self.invited_by_id
+          inviter = self.invited_by_class.get(self.invited_by_id)
+        end
+          
+        inviter
+      end
+
       # Verifies whether a user has been invited or not
       def invited?
         persisted? && invitation_token.present?
@@ -53,11 +81,11 @@ module Devise
       # Reset invitation token and send invitation again
       def invite!
         was_invited = invited?
-        self.skip_confirmation! if self.new_record? && self.respond_to?(:skip_confirmation!)
+        self.skip_confirmation! if self.new? && self.respond_to?(:skip_confirmation!)
         generate_invitation_token if self.invitation_token.nil?
         self.invitation_sent_at = Time.now.utc
         if save(:validate => false)
-          self.invited_by.decrement_invitation_limit! if !was_invited and self.invited_by.present?
+          self.invited_by.adjust!(:invitation_limit => 1) if !was_invited and !self.invited_by.nil?
           deliver_invitation unless @skip_invitation
         end
       end
@@ -128,12 +156,12 @@ module Devise
         # Attributes must contain the user email, other attributes will be set in the record
         def _invite(attributes={}, invited_by=nil, &block)
           invitable = find_or_initialize_with_error_by(invite_key, attributes.delete(invite_key))
-          invitable.assign_attributes(attributes, :as => inviter_role(invited_by))
+          invitable.attributes = attributes
           invitable.invited_by = invited_by
 
           invitable.skip_password = true
           invitable.valid? if self.validate_on_invite
-          if invitable.new_record?
+          if invitable.new?
             invitable.errors.clear if !self.validate_on_invite and invitable.email.try(:match, Devise.email_regexp)
           else
             invitable.errors.add(invite_key, :taken) unless invitable.invited? && self.resend_invitation
